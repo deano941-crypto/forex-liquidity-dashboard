@@ -1,1 +1,6 @@
-streamlit>=1.39,<2\npandas>=2.1,<3\nnumpy>=1.26,<3\nrequests>=2.31,<3\nplotly>=5.24,<7\npytest>=8,<9\n
+streamlit>=1.39,<2
+pandas>=2.1,<3
+numpy>=1.26,<3
+requests>=2.31,<3
+plotly>=5.24,<7
+pytest>=8,<9

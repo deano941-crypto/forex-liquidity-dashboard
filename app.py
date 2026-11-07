@@ -1,109 +1,192 @@
-import os
-import streamlit as st
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from data.oanda import OandaClient, OANDA_INSTRUMENTS, scan_instruments
-from agents.engine import run_desk
 
-st.set_page_config(page_title="APEX AI Trading Desk", page_icon="📈", layout="wide")
-st.title("📈 APEX AI Trading Desk")
-st.caption("Six-agent market intelligence • OANDA REST v20 • Gold + Forex • Analysis only")
 
-def secret(key):
-    try:
-        return st.secrets.get(key, os.getenv(key, ""))
-    except Exception:
-        return os.getenv(key, "")
+def calculate_volume_profile(df: pd.DataFrame, bins: int = 50):
+  """Calculates Point of Control (POC), Value Area High (VAH),
 
-with st.sidebar:
-    st.header("OANDA connection")
-    environment = st.selectbox("Environment", ["practice", "live"])
-    token = secret("OANDA_API_TOKEN")
-    st.success("API token configured") if token else st.warning("Add OANDA_API_TOKEN to secrets")
-    st.divider()
-    instruments = st.multiselect("Markets to scan", list(OANDA_INSTRUMENTS),
-        default=["XAU_USD", "EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD"])
-    symbol = st.selectbox("Chart instrument", instruments or list(OANDA_INSTRUMENTS))
-    timeframe = st.selectbox("Timeframe", ["M1", "M2", "M5", "M15", "M30", "H1", "H4"])
-    count = st.slider("Candles", 100, 1000, 500, 50)
-    risk_pct = st.slider("Risk reference (%)", 0.1, 2.0, 0.5, 0.1)
-    st.caption("No orders are placed. Signals are analytical candidates only.")
+  and Value Area Low (VAL) from a given DataFrame of candles.
+  """
+  if df.empty or "High" not in df.columns or "Low" not in df.columns:
+    return None
 
-client = OandaClient(token, environment) if token else None
-chart_tab, scan_tab, agents_tab, setup_tab = st.tabs(["📊 Candlestick chart", "🔎 Market scanner", "🤖 Agent reports", "⚙️ Setup"])
+  price_min = df["Low"].min()
+  price_max = df["High"].max()
+  if price_min == price_max:
+    return None
 
-with chart_tab:
-    st.subheader(f"{OANDA_INSTRUMENTS[symbol]} · {timeframe}")
-    if st.button("Fetch OANDA candles", type="primary"):
-        if not client:
-            st.error("Configure your OANDA API token in Streamlit secrets.")
-        else:
-            try:
-                st.session_state["candles"] = client.get_candles(symbol, timeframe, count)
-                st.session_state["chart_symbol"] = symbol
-            except Exception as exc:
-                st.error(str(exc))
-    df = st.session_state.get("candles")
-    if df is not None and st.session_state.get("chart_symbol") == symbol:
-        fig = go.Figure([go.Candlestick(x=df.time, open=df.open, high=df.high, low=df.low, close=df.close)])
-        fig.update_layout(template="plotly_dark", height=560, xaxis_rangeslider_visible=False)
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption("Completed midpoint candles only. OANDA candle volume is tick count, not centralised traded volume.")
-        if st.button("Run six agents on chart"):
-            st.session_state["agent_result"] = run_desk(df, symbol, timeframe, risk_pct)
-    else:
-        st.info("Fetch candles to display the chart.")
+  price_bins = np.linspace(price_min, price_max, bins)
+  volume_at_price = np.zeros(bins - 1)
 
-with scan_tab:
-    st.subheader("Multi-market scanner")
-    if st.button("Scan selected instruments", type="primary"):
-        if not client:
-            st.error("Configure your OANDA API token in Streamlit secrets.")
-        elif not instruments:
-            st.warning("Select at least one instrument.")
-        else:
-            with st.spinner("Fetching completed candles and running agents..."):
-                try:
-                    st.session_state["scan_results"] = scan_instruments(client, instruments, timeframe, min(count, 500), risk_pct)
-                except Exception as exc:
-                    st.error(str(exc))
-    if st.session_state.get("scan_results"):
-        st.dataframe(pd.DataFrame(st.session_state["scan_results"]), use_container_width=True, hide_index=True)
+  for _, row in df.iterrows():
+    c_low, c_high, c_vol = row["Low"], row["High"], row["Volume"]
+    if c_high == c_low or c_vol == 0:
+      continue
 
-with agents_tab:
-    result = st.session_state.get("agent_result")
-    if result:
-        a,b,c = st.columns(3)
-        a.metric("Chief decision", result["decision"])
-        b.metric("Directional votes", f'{result["votes"]}/4')
-        c.metric("Risk gate", result["risk_status"])
-        st.info(result["summary"])
-        if result["levels"]:
-            a,b,c,d = st.columns(4)
-            a.metric("Entry reference", f'{result["levels"]["entry"]:.5f}')
-            b.metric("Stop", f'{result["levels"]["stop"]:.5f}')
-            c.metric("TP1", f'{result["levels"]["tp1"]:.5f}')
-            d.metric("TP2", f'{result["levels"]["tp2"]:.5f}')
-        for agent in result["agents"]:
-            with st.expander(f'{agent["name"]} — {agent["stance"]}', expanded=True):
-                st.write(agent["finding"])
-                st.caption(agent["evidence"])
-    else:
-        st.info("Run the agents from the candlestick chart tab.")
+    bin_indices = np.where(
+        (price_bins[:-1] <= c_high) & (price_bins[1:] >= c_low)
+    )[0]
+    if len(bin_indices) > 0:
+      vol_per_bin = c_vol / len(bin_indices)
+      for idx in bin_indices:
+        volume_at_price[idx] += vol_per_bin
 
-with setup_tab:
-    st.markdown("""
-    Create `.streamlit/secrets.toml` locally, or add these values in Streamlit Community Cloud → App settings → Secrets:
+  bin_centers = (price_bins[:-1] + price_bins[1:]) / 2
+  poc_idx = np.argmax(volume_at_price)
+  poc_price = bin_centers[poc_idx]
 
-    ```toml
-    OANDA_API_TOKEN = "your-personal-access-token"
-    OANDA_ACCOUNT_ID = "your-v20-account-id"
-    ```
+  # Calculate 70% Value Area
+  total_vol = np.sum(volume_at_price)
+  if total_vol == 0:
+    return None
+  target_vol = total_vol * 0.70
 
-    Start with **practice**. Never commit your real secrets file to GitHub.
-    """)
-    st.markdown("[OANDA REST v20 documentation](https://developer.oanda.com/rest-live-v20/introduction/) · [API token instructions](https://help.oanda.com/us/en/faqs/rest-v20-api-troubleshooting-guide.htm)")
-    st.warning("Your OANDA account must support REST v20. The account ID is retained for future account-specific pricing features.")
+  sorted_indices = np.argsort(volume_at_price)[::-1]
+  accumulated_vol = 0
+  va_indices = []
 
-st.divider()
-st.caption("APEX AI Trading Desk v1.1 • OANDA API • Analysis and signals only • No execution")
+  for idx in sorted_indices:
+    accumulated_vol += volume_at_price[idx]
+    va_indices.append(idx)
+    if accumulated_vol >= target_vol:
+      break
+
+  val_price = bin_centers[min(va_indices)]
+  vah_price = bin_centers[max(va_indices)]
+
+  return {
+      "poc": poc_price,
+      "val": min(val_price, vah_price),
+      "vah": max(val_price, vah_price),
+  }
+
+
+def get_prior_week_profile(df: pd.DataFrame):
+  """Splits data by week, isolating the prior completed week's volume profile."""
+  if "Time" not in df.columns:
+    # Ensure datetime index is converted
+    df = df.copy()
+    df["Time"] = pd.to_datetime(df.index)
+
+  df["YearWeek"] = df["Time"].dt.strftime("%Y-%U")
+  unique_weeks = df["YearWeek"].unique()
+
+  if len(unique_weeks) < 2:
+    return None  # Need at least current week + 1 prior week
+
+  prior_week_id = unique_weeks[-2]
+  prior_df = df[df["YearWeek"] == prior_week_id]
+
+  return calculate_volume_profile(prior_df)
+
+
+def evaluate_weekly_strategy(current_df: pd.DataFrame, profile: dict):
+  """Evaluates price action rules:
+
+  - Breakout above VAH + pullback to VAH -> Limit Buy (Stop at VAL)
+  - Breakdown below VAL + pullback to VAL -> Limit Sell (Stop at VAH)
+  """
+  if not profile:
+    return {"signal": None}
+
+  vah = profile["vah"]
+  val = profile["val"]
+
+  latest_close = current_df["Close"].iloc[-1]
+  recent_high = current_df["High"].max()
+  recent_low = current_df["Low"].min()
+
+  signal = None
+  entry_price = None
+  stop_loss = None
+
+  # Bullish Rule: Broke prior week VAH to make new high, pulling back to retest VAH
+  if recent_high > vah and abs(latest_close - vah) / vah <= 0.0015:
+    signal = "BULLISH_LIMIT_BUY"
+    entry_price = vah
+    stop_loss = val
+
+  # Bearish Rule: Broke prior week VAL to make new low, pulling back to retest VAL
+  elif recent_low < val and abs(latest_close - val) / val <= 0.0015:
+    signal = "BEARISH_LIMIT_SELL"
+    entry_price = val
+    stop_loss = vah
+
+  return {
+      "signal": signal,
+      "entry": entry_price,
+      "stop_loss": stop_loss,
+      "vah": vah,
+      "val": val,
+  }
+
+
+def plot_chart_with_weekly_profile(df: pd.DataFrame, profile: dict):
+  """Renders Plotly candlestick chart with horizontal weekly VAH/VAL lines printing
+
+  across the new week.
+  """
+  fig = go.Figure()
+
+  # Add Candlesticks
+  fig.add_trace(
+      go.Candlestick(
+          x=df.index,
+          open=df["Open"],
+          high=df["High"],
+          low=df["Low"],
+          close=df["Close"],
+          name="Price Action",
+      )
+  )
+
+  if profile:
+    vah = profile["vah"]
+    val = profile["val"]
+    poc = profile["poc"]
+    start_time = df.index[0]
+    end_time = df.index[-1]
+
+    # Plot Prior Week's VAH (Blue/Cyan)
+    fig.add_trace(
+        go.Scatter(
+            x=[start_time, end_time],
+            y=[vah, vah],
+            mode="lines",
+            name=f"Prior Week VAH: {vah:.5f}",
+            line=dict(color="cyan", dash="dash", width=2),
+        )
+    )
+
+    # Plot Prior Week's VAL (Orange/Gold)
+    fig.add_trace(
+        go.Scatter(
+            x=[start_time, end_time],
+            y=[val, val],
+            mode="lines",
+            name=f"Prior Week VAL: {val:.5f}",
+            line=dict(color="orange", dash="dash", width=2),
+        )
+    )
+
+    # Plot Prior Week's POC (Green)
+    fig.add_trace(
+        go.Scatter(
+            x=[start_time, end_time],
+            y=[poc, poc],
+            mode="lines",
+            name=f"Prior Week POC: {poc:.5f}",
+            line=dict(color="green", dash="dot", width=1.5),
+        )
+    )
+
+  fig.update_layout(
+      title="APEX AI Trading Desk - Weekly Volume Profile Strategy",
+      xaxis_title="Time",
+      yaxis_title="Price",
+      template="plotly_dark",
+      xaxis_rangeslider_visible=False,
+  )
+
+  return fig

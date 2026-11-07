@@ -1,0 +1,29 @@
+APEX OANDA - FILES TO ADD (app.py is intentionally not included)
+
+1. In your GitHub repository, create these folders if they do not already exist:
+   agents
+   data
+   tests
+   .streamlit
+
+2. Add each file in this package to the matching folder, keeping the exact names.
+3. Do NOT upload a real .streamlit/secrets.toml file to GitHub.
+   The secrets.toml.example file is only a template.
+4. Add your OANDA API token later in Streamlit Community Cloud > App > Settings > Secrets.
+5. Start with OANDA practice mode.
+
+Files included:
+- requirements.txt
+- README.md
+- .gitignore
+- agents/__init__.py
+- agents/indicators.py
+- agents/engine.py
+- data/__init__.py
+- data/oanda.py
+- data/demo.py
+- tests/__init__.py
+- tests/test_engine.py
+- .streamlit/secrets.toml.example
+
+This is an analysis/signals project only. It does not place trades.
